@@ -1,0 +1,721 @@
+import React, { useEffect, useState, useRef } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import { ArrowLeft, Plus, Trash2, Edit2, Upload, Check, X, FileText, Loader2, Play } from 'lucide-react';
+import { getEvaluation, updateEvaluation, analyzeEvaluation } from '../services/api/evaluations';
+import ProcurementSimulator from '../components/ProcurementSimulator';
+import { getRequirements, createRequirement, updateRequirement, deleteRequirement } from '../services/api/requirements';
+import { getVendors, createVendor, updateVendor, deleteVendor } from '../services/api/vendors';
+import { getProposalsByEvaluation, uploadProposal, deleteProposal, processProposal, getProposalStatus, generateEmbeddings, getEmbeddingStatus } from '../services/api/proposals';
+import { askProcurementAI } from '../services/api/rag';
+
+export default function EvaluationDetail() {
+  const { id } = useParams();
+  const [evaluation, setEvaluation] = useState(null);
+  const [requirements, setRequirements] = useState([]);
+  const [vendors, setVendors] = useState([]);
+  const [proposals, setProposals] = useState([]);
+  
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [uploadingVendorId, setUploadingVendorId] = useState(null);
+  const [processingId, setProcessingId] = useState(null);
+  const [embeddingId, setEmbeddingId] = useState(null);
+  const [chunkCounts, setChunkCounts] = useState({});
+  const [embedCounts, setEmbedCounts] = useState({});
+
+  // AI State
+  const [aiQuery, setAiQuery] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiResult, setAiResult] = useState(null);
+
+  // Multi-Agent State
+  const [graphQuery, setGraphQuery] = useState('Run a full procurement analysis comparing all vendors.');
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphResult, setGraphResult] = useState(null);
+  const [priorities, setPriorities] = useState({ requirements: 50, cost: 30, risk: 20 });
+  const [simulationResult, setSimulationResult] = useState(null);
+  const [simulating, setSimulating] = useState(false);
+  const [selectedScenario, setSelectedScenario] = useState('Balanced');
+  const [expandedVendorId, setExpandedVendorId] = useState(null);
+  
+  const presets = {
+    'Balanced': { requirements: 50, cost: 30, risk: 20 },
+    'Quality First': { requirements: 70, cost: 15, risk: 15 },
+    'Cost Optimized': { requirements: 20, cost: 60, risk: 20 },
+    'Risk Averse': { requirements: 30, cost: 20, risk: 50 },
+  };
+
+  const handleScenarioChange = async (scenarioName) => {
+    setSelectedScenario(scenarioName);
+    const newP = presets[scenarioName];
+    await handlePrioritiesUpdate(newP);
+  };
+  
+  const handleCustomPriorityChange = async (key, val) => {
+    setSelectedScenario('Custom');
+    const newP = { ...priorities, [key]: parseInt(val) };
+    await handlePrioritiesUpdate(newP);
+  };
+  
+  const handlePrioritiesUpdate = async (newP) => {
+    const oldP = priorities;
+    setPriorities(newP);
+    
+    // Only simulate if sum is exactly 100 and we have a graph result already
+    if (newP.requirements + newP.cost + newP.risk === 100 && graphResult) {
+      try {
+        setSimulating(true);
+        const res = await simulateEvaluation(id, newP, oldP);
+        setSimulationResult(res);
+      } catch (err) {
+        console.error("Simulation failed", err);
+      } finally {
+        setSimulating(false);
+      }
+    }
+  };
+
+
+  // Requirement Forms
+  const [reqForm, setReqForm] = useState({ name: '', description: '', priority: 'must_have', category: '', weight: 1.0, minimum_value: '', preferred_value: '' });
+  const [editingReqId, setEditingReqId] = useState(null);
+  const [editReqForm, setEditReqForm] = useState({});
+
+  // Vendor Forms
+  const [vendorForm, setVendorForm] = useState({ name: '', contact_info: '' });
+  const [editingVendorId, setEditingVendorId] = useState(null);
+  const [editVendorForm, setEditVendorForm] = useState({});
+  
+  // File inputs ref
+  const fileInputRefs = useRef({});
+
+  const fetchData = async () => {
+    if (!id) return;
+    try {
+      setLoading(true);
+      setError(null);
+      const [evalData, reqData, vendorData, propData] = await Promise.all([
+        getEvaluation(id),
+        getRequirements(id),
+        getVendors(id),
+        getProposalsByEvaluation(id)
+      ]);
+      setEvaluation(evalData);
+      setRequirements(reqData);
+      setVendors(vendorData);
+      setProposals(propData);
+
+      // Fetch chunk counts for completed proposals
+      const cCounts = {};
+      const eCounts = {};
+      for (const p of propData) {
+        if (p.processing_status === 'completed') {
+          try {
+            const statusData = await getProposalStatus(p.id);
+            cCounts[p.id] = statusData.chunk_count;
+            const embedData = await getEmbeddingStatus(p.id);
+            eCounts[p.id] = embedData.embedded_chunks;
+          } catch(e) {}
+        }
+      }
+      setChunkCounts(cCounts);
+      setEmbedCounts(eCounts);
+
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to load evaluation data.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, [id]);
+
+  // --- Requirements Logic ---
+  const handleAddRequirement = async (e) => {
+    e.preventDefault();
+    if (!id || !reqForm.name) return;
+    try {
+      const newReq = await createRequirement(id, reqForm);
+      setRequirements([...requirements, newReq]);
+      setReqForm({ name: '', description: '', priority: 'must_have', category: '', weight: 1.0, minimum_value: '', preferred_value: '' });
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to add requirement.');
+    }
+  };
+
+  const handleEditReqInit = (req) => {
+    setEditingReqId(req.id);
+    setEditReqForm(req);
+  };
+
+  const handleEditReqSave = async (reqId) => {
+    try {
+      const updated = await updateRequirement(reqId, editReqForm);
+      setRequirements(requirements.map(r => r.id === reqId ? updated : r));
+      setEditingReqId(null);
+    } catch (err) {
+      alert('Failed to update requirement.');
+    }
+  };
+
+  const handleDeleteRequirement = async (reqId) => {
+    if (!confirm('Delete requirement?')) return;
+    try {
+      await deleteRequirement(reqId);
+      setRequirements(requirements.filter(r => r.id !== reqId));
+    } catch (err) {
+      alert('Failed to delete requirement');
+    }
+  };
+
+  // --- Vendors Logic ---
+  const handleAddVendor = async (e) => {
+    e.preventDefault();
+    if (!id || !vendorForm.name) return;
+    try {
+      const newVendor = await createVendor(id, vendorForm);
+      setVendors([...vendors, newVendor]);
+      setVendorForm({ name: '', contact_info: '' });
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to add vendor.');
+    }
+  };
+
+  const handleEditVendorInit = (vendor) => {
+    setEditingVendorId(vendor.id);
+    setEditVendorForm(vendor);
+  };
+
+  const handleEditVendorSave = async (vendorId) => {
+    try {
+      const updated = await updateVendor(vendorId, editVendorForm);
+      setVendors(vendors.map(v => v.id === vendorId ? updated : v));
+      setEditingVendorId(null);
+    } catch (err) {
+      alert('Failed to update vendor.');
+    }
+  };
+
+  const handleDeleteVendor = async (vendorId) => {
+    if (!confirm('Delete vendor?')) return;
+    try {
+      await deleteVendor(vendorId);
+      setVendors(vendors.filter(v => v.id !== vendorId));
+    } catch (err) {
+      alert('Failed to delete vendor');
+    }
+  };
+  
+  // --- Proposals Logic ---
+  const handleFileUpload = async (vendorId, e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    // Clear input so same file can be selected again if it fails
+    e.target.value = '';
+    
+    if (file.type !== 'application/pdf') {
+      alert('Only PDF files are allowed.');
+      return;
+    }
+    
+    if (file.size > 10 * 1024 * 1024) {
+      alert('File exceeds maximum size of 10 MB.');
+      return;
+    }
+
+    try {
+      setUploadingVendorId(vendorId);
+      const newProposal = await uploadProposal(id, vendorId, file);
+      setProposals([...proposals, newProposal]);
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to upload proposal.');
+    } finally {
+      setUploadingVendorId(null);
+    }
+  };
+
+  const handleDeleteProposal = async (proposalId) => {
+    if (!confirm('Are you sure you want to delete this proposal document?')) return;
+    try {
+      await deleteProposal(proposalId);
+      setProposals(proposals.filter(p => p.id !== proposalId));
+    } catch (err) {
+      alert('Failed to delete proposal.');
+    }
+  };
+
+  const handleProcessProposal = async (proposalId) => {
+    try {
+      setProcessingId(proposalId);
+      // Optimistic update
+      setProposals(proposals.map(p => p.id === proposalId ? { ...p, processing_status: 'processing' } : p));
+      
+      const result = await processProposal(proposalId);
+      
+      setProposals(proposals.map(p => p.id === proposalId ? { ...p, processing_status: result.status } : p));
+      setChunkCounts({...chunkCounts, [proposalId]: result.chunk_count});
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to process proposal.');
+      setProposals(proposals.map(p => p.id === proposalId ? { ...p, processing_status: 'failed' } : p));
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  const handleGenerateEmbeddings = async (proposalId) => {
+    try {
+      setEmbeddingId(proposalId);
+      const result = await generateEmbeddings(proposalId);
+      setEmbedCounts({...embedCounts, [proposalId]: result.chunks_embedded});
+      alert(`Successfully generated embeddings for ${result.chunks_embedded} chunks.`);
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to generate embeddings.');
+    } finally {
+      setEmbeddingId(null);
+    }
+  };
+
+  const handleAskAI = async (e) => {
+    e.preventDefault();
+    if (!aiQuery.trim()) return;
+    
+    try {
+      setAiLoading(true);
+      setAiResult(null);
+      const result = await askProcurementAI(aiQuery, id);
+      setAiResult(result);
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to ask AI.');
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handlePriorityChange = (field, value) => {
+    let val = parseInt(value) || 0;
+    if (val > 100) val = 100;
+    if (val < 0) val = 0;
+    
+    setPriorities(prev => {
+      const remaining = 100 - val;
+      const others = Object.keys(prev).filter(k => k !== field);
+      const [o1, o2] = others;
+      
+      let currentOtherTotal = prev[o1] + prev[o2];
+      let newO1, newO2;
+      
+      if (currentOtherTotal === 0) {
+        newO1 = Math.floor(remaining / 2);
+        newO2 = remaining - newO1;
+      } else {
+        newO1 = Math.round((prev[o1] / currentOtherTotal) * remaining);
+        newO2 = remaining - newO1;
+      }
+      
+      return {
+        ...prev,
+        [field]: val,
+        [o1]: newO1,
+        [o2]: newO2
+      };
+    });
+  };
+
+  const handleRunGraph = async () => {
+    if (!graphQuery.trim()) return;
+    const total = priorities.requirements + priorities.cost + priorities.risk;
+    if (total !== 100) {
+      alert(`Priorities must sum to 100. Current sum is ${total}.`);
+      return;
+    }
+    
+    try {
+      setGraphLoading(true);
+      setGraphResult(null);
+      const result = await analyzeEvaluation(id, graphQuery, priorities);
+      setGraphResult(result);
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to run analysis graph.');
+    } finally {
+      setGraphLoading(false);
+    }
+  };
+
+  if (loading) return <div className="text-gray-500 flex justify-center py-10">Loading details...</div>;
+  if (error) return <div className="text-red-500 bg-red-50 p-4 rounded-md">{error}</div>;
+  if (!evaluation) return <div>Evaluation not found.</div>;
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div>
+        <Link to="/evaluations" className="text-blue-600 hover:underline flex items-center gap-1 text-sm font-medium mb-4">
+          <ArrowLeft size={16} /> Back to Evaluations
+        </Link>
+        <div className="flex justify-between items-start">
+          <div>
+            <h2 className="text-3xl font-bold text-gray-900">{evaluation.name}</h2>
+            {evaluation.description && <p className="text-gray-500 mt-2">{evaluation.description}</p>}
+          </div>
+          <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium capitalize">
+            {evaluation.status}
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+        {/* Requirements Section */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <h3 className="text-xl font-semibold mb-4 border-b pb-2">Requirements</h3>
+          
+          <form onSubmit={handleAddRequirement} className="mb-6 space-y-3 bg-gray-50 p-4 rounded-md border border-gray-100">
+            <h4 className="text-sm font-medium text-gray-700">Add Requirement</h4>
+            <div className="grid grid-cols-2 gap-3">
+              <input type="text" required placeholder="Name *" className="w-full border-gray-300 rounded text-sm px-3 py-2 border focus:ring-blue-500 focus:border-blue-500 col-span-2" value={reqForm.name} onChange={e => setReqForm({...reqForm, name: e.target.value})} />
+              <input type="text" placeholder="Description" className="w-full border-gray-300 rounded text-sm px-3 py-2 border col-span-2" value={reqForm.description} onChange={e => setReqForm({...reqForm, description: e.target.value})} />
+              <select className="border-gray-300 rounded text-sm px-3 py-2 border" value={reqForm.priority} onChange={e => setReqForm({...reqForm, priority: e.target.value})}>
+                <option value="must_have">Must Have</option>
+                <option value="nice_to_have">Nice to Have</option>
+                <option value="optional">Optional</option>
+              </select>
+              <input type="text" placeholder="Category" className="border-gray-300 rounded text-sm px-3 py-2 border" value={reqForm.category} onChange={e => setReqForm({...reqForm, category: e.target.value})} />
+              <input type="number" step="0.1" placeholder="Weight (e.g. 1.0)" className="border-gray-300 rounded text-sm px-3 py-2 border" value={reqForm.weight} onChange={e => setReqForm({...reqForm, weight: parseFloat(e.target.value)})} />
+              <input type="text" placeholder="Minimum Value" className="border-gray-300 rounded text-sm px-3 py-2 border" value={reqForm.minimum_value} onChange={e => setReqForm({...reqForm, minimum_value: e.target.value})} />
+              <input type="text" placeholder="Preferred Value" className="border-gray-300 rounded text-sm px-3 py-2 border" value={reqForm.preferred_value} onChange={e => setReqForm({...reqForm, preferred_value: e.target.value})} />
+            </div>
+            <button type="submit" className="text-sm bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700 flex items-center gap-1 w-full justify-center mt-2">
+              <Plus size={14} /> Add Requirement
+            </button>
+          </form>
+
+          <div className="space-y-3">
+            {requirements.length === 0 ? (
+              <p className="text-sm text-gray-500 italic">No requirements defined yet.</p>
+            ) : (
+              requirements.map(req => (
+                <div key={req.id} className="flex justify-between items-start p-3 border border-gray-100 rounded bg-white">
+                  {editingReqId === req.id ? (
+                    <div className="flex-1 space-y-2">
+                      <input type="text" className="w-full border rounded text-sm p-1" value={editReqForm.name} onChange={e => setEditReqForm({...editReqForm, name: e.target.value})} />
+                      <div className="flex gap-2">
+                         <select className="border rounded text-sm p-1" value={editReqForm.priority} onChange={e => setEditReqForm({...editReqForm, priority: e.target.value})}>
+                            <option value="must_have">Must Have</option>
+                            <option value="nice_to_have">Nice to Have</option>
+                            <option value="optional">Optional</option>
+                          </select>
+                          <button onClick={() => handleEditReqSave(req.id)} className="text-green-600"><Check size={16} /></button>
+                          <button onClick={() => setEditingReqId(null)} className="text-gray-500"><X size={16} /></button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <h5 className="text-sm font-medium text-gray-900">{req.name}</h5>
+                        {req.description && <p className="text-xs text-gray-500 mt-1">{req.description}</p>}
+                        <div className="flex flex-wrap gap-2 mt-1 text-xs">
+                          <span className={`px-2 py-0.5 rounded-full ${
+                            req.priority === 'must_have' ? 'bg-red-100 text-red-700' :
+                            req.priority === 'nice_to_have' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'
+                          }`}>
+                            {req.priority.replace(/_/g, ' ')}
+                          </span>
+                          {req.category && <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{req.category}</span>}
+                          {req.weight && <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">Weight: {req.weight}</span>}
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={() => handleEditReqInit(req)} className="text-gray-400 hover:text-blue-600"><Edit2 size={16} /></button>
+                        <button onClick={() => handleDeleteRequirement(req.id)} className="text-gray-400 hover:text-red-600"><Trash2 size={16} /></button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Vendors Section */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <h3 className="text-xl font-semibold mb-4 border-b pb-2">Vendors</h3>
+          
+          <form onSubmit={handleAddVendor} className="mb-6 space-y-3 bg-gray-50 p-4 rounded-md border border-gray-100">
+            <h4 className="text-sm font-medium text-gray-700">Add Vendor</h4>
+            <div className="flex flex-col gap-3">
+              <input
+                type="text" required placeholder="Vendor name *"
+                className="w-full border-gray-300 rounded text-sm px-3 py-2 border focus:ring-blue-500 focus:border-blue-500"
+                value={vendorForm.name} onChange={e => setVendorForm({...vendorForm, name: e.target.value})}
+              />
+              <input
+                type="text" placeholder="Contact Information"
+                className="w-full border-gray-300 rounded text-sm px-3 py-2 border focus:ring-blue-500 focus:border-blue-500"
+                value={vendorForm.contact_info} onChange={e => setVendorForm({...vendorForm, contact_info: e.target.value})}
+              />
+              <button type="submit" className="text-sm bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700 flex items-center justify-center gap-1 w-full mt-1">
+                <Plus size={14} /> Add Vendor
+              </button>
+            </div>
+          </form>
+
+          <div className="space-y-4">
+            {vendors.length === 0 ? (
+              <p className="text-sm text-gray-500 italic">No vendors added yet.</p>
+            ) : (
+              vendors.map(vendor => (
+                <div key={vendor.id} className="flex flex-col p-4 border border-gray-100 rounded-lg bg-white shadow-sm gap-3">
+                   {editingVendorId === vendor.id ? (
+                      <div className="space-y-2">
+                        <input type="text" className="w-full border rounded text-sm p-1" value={editVendorForm.name} onChange={e => setEditVendorForm({...editVendorForm, name: e.target.value})} />
+                        <input type="text" className="w-full border rounded text-sm p-1" value={editVendorForm.contact_info} onChange={e => setEditVendorForm({...editVendorForm, contact_info: e.target.value})} />
+                        <div className="flex gap-2">
+                          <button onClick={() => handleEditVendorSave(vendor.id)} className="text-green-600"><Check size={16} /></button>
+                          <button onClick={() => setEditingVendorId(null)} className="text-gray-500"><X size={16} /></button>
+                        </div>
+                      </div>
+                   ) : (
+                     <>
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <h5 className="text-base font-semibold text-gray-900">{vendor.name}</h5>
+                          {vendor.contact_info && <p className="text-xs text-gray-500 mt-1">{vendor.contact_info}</p>}
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => handleEditVendorInit(vendor)} className="text-gray-400 hover:text-blue-600"><Edit2 size={16} /></button>
+                          <button onClick={() => handleDeleteVendor(vendor.id)} className="text-gray-400 hover:text-red-600"><Trash2 size={16} /></button>
+                        </div>
+                      </div>
+                      
+                      {/* Proposals Section for Vendor */}
+                      <div className="mt-2 border-t pt-3">
+                        <h6 className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Proposals</h6>
+                        <div className="space-y-2">
+                          {proposals.filter(p => p.vendor_id === vendor.id).map(prop => (
+                            <div key={prop.id} className="flex flex-col p-2 bg-gray-50 rounded border border-gray-100">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2 overflow-hidden">
+                                  <FileText size={16} className="text-blue-500 flex-shrink-0" />
+                                  <div className="truncate">
+                                    <p className="text-sm font-medium text-gray-800 truncate" title={prop.file_name}>{prop.file_name}</p>
+                                    <div className="flex items-center gap-2 text-xs text-gray-500 mt-0.5">
+                                      <span className={`capitalize px-1.5 rounded ${
+                                        prop.processing_status === 'completed' ? 'bg-green-100 text-green-700' :
+                                        prop.processing_status === 'processing' ? 'bg-yellow-100 text-yellow-700' :
+                                        prop.processing_status === 'failed' ? 'bg-red-100 text-red-700' :
+                                        'bg-blue-100 text-blue-700'
+                                      }`}>
+                                        {prop.processing_status}
+                                      </span>
+                                      <span>{new Date(prop.uploaded_at).toLocaleDateString()}</span>
+                                      {chunkCounts[prop.id] !== undefined && <span className="text-gray-400">({chunkCounts[prop.id]} chunks)</span>}
+                                      {prop.processing_status === 'completed' && (
+                                        <span className={`ml-1 px-1.5 rounded ${
+                                          embedCounts[prop.id] === chunkCounts[prop.id] && chunkCounts[prop.id] > 0
+                                            ? 'bg-purple-100 text-purple-700' 
+                                            : 'bg-gray-200 text-gray-600'
+                                        }`}>
+                                          {embedCounts[prop.id] === chunkCounts[prop.id] && chunkCounts[prop.id] > 0 ? 'Vectors Ready' : 'No Vectors'}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  {prop.processing_status === 'completed' && (
+                                    <button 
+                                      onClick={() => handleGenerateEmbeddings(prop.id)}
+                                      disabled={embeddingId === prop.id || embedCounts[prop.id] === chunkCounts[prop.id]}
+                                      className="p-1 text-gray-400 hover:text-purple-600 disabled:opacity-50"
+                                      title="Generate Embeddings"
+                                    >
+                                      {embeddingId === prop.id ? <Loader2 size={14} className="animate-spin" /> : <span className="text-xs font-bold font-mono">EMB</span>}
+                                    </button>
+                                  )}
+                                  <button 
+                                    onClick={() => handleProcessProposal(prop.id)} 
+                                    disabled={processingId === prop.id || prop.processing_status === 'processing'}
+                                    className="p-1 text-gray-400 hover:text-green-600 disabled:opacity-50" 
+                                    title="Process Proposal (Text)"
+                                  >
+                                    {processingId === prop.id || prop.processing_status === 'processing' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                                  </button>
+                                  <button onClick={() => handleDeleteProposal(prop.id)} className="p-1 text-gray-400 hover:text-red-600">
+                                    <Trash2 size={14} />
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                          
+                          {proposals.filter(p => p.vendor_id === vendor.id).length === 0 && (
+                            <p className="text-xs text-gray-400 italic mb-2">No proposals uploaded.</p>
+                          )}
+                          
+                          {/* Upload Area */}
+                          <div className="pt-2">
+                            <input 
+                              type="file" 
+                              accept="application/pdf" 
+                              className="hidden" 
+                              ref={el => fileInputRefs.current[vendor.id] = el}
+                              onChange={(e) => handleFileUpload(vendor.id, e)}
+                            />
+                            <button 
+                              onClick={() => fileInputRefs.current[vendor.id]?.click()}
+                              disabled={uploadingVendorId === vendor.id}
+                              className="w-full flex flex-col items-center justify-center p-3 border-2 border-dashed border-gray-200 rounded-md hover:border-blue-400 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {uploadingVendorId === vendor.id ? (
+                                <>
+                                  <Loader2 size={18} className="text-blue-500 mb-1 animate-spin" />
+                                  <span className="text-xs text-blue-600 font-medium">Uploading...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Upload size={18} className="text-gray-400 mb-1" />
+                                  <span className="text-xs text-gray-600 font-medium">Click to upload PDF proposal</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                     </>
+                   )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Multi-Agent Graph Section */}
+      <div className="bg-indigo-50 p-6 rounded-lg shadow-sm border border-indigo-100 mt-8">
+        <div className="flex flex-col gap-4 border-b border-indigo-200 pb-4 mb-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xl font-bold text-indigo-900">LangGraph Multi-Agent Analysis</h3>
+            <button 
+              onClick={handleRunGraph}
+              disabled={graphLoading || (priorities.requirements + priorities.cost + priorities.risk !== 100)}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
+            >
+              {graphLoading ? <Loader2 size={16} className="animate-spin" /> : "Run Full Procurement Analysis"}
+            </button>
+          </div>
+          
+          <div className="bg-white p-4 rounded-md border border-indigo-100">
+            <h4 className="text-sm font-bold text-indigo-800 uppercase tracking-wider mb-3 flex justify-between">
+              <span>Procurement Priorities</span>
+              <span className={`text-xs ${priorities.requirements + priorities.cost + priorities.risk === 100 ? 'text-green-600' : 'text-red-600'}`}>
+                Total: {priorities.requirements + priorities.cost + priorities.risk}%
+              </span>
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="text-xs text-gray-600 font-semibold mb-1 block">Requirements ({priorities.requirements}%)</label>
+                <input type="range" min="0" max="100" value={priorities.requirements} onChange={(e) => handlePriorityChange('requirements', e.target.value)} className="w-full" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-600 font-semibold mb-1 block">Cost/TCO ({priorities.cost}%)</label>
+                <input type="range" min="0" max="100" value={priorities.cost} onChange={(e) => handlePriorityChange('cost', e.target.value)} className="w-full" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-600 font-semibold mb-1 block">Risk ({priorities.risk}%)</label>
+                <input type="range" min="0" max="100" value={priorities.risk} onChange={(e) => handlePriorityChange('risk', e.target.value)} className="w-full" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {graphResult && (
+          <div className="space-y-6 mt-6">
+             {/* Trace is optional, let's keep it if they want to see what happened */}
+             <div className="bg-white p-4 rounded border border-indigo-100 mb-6">
+              <h4 className="text-sm font-bold text-indigo-800 uppercase tracking-wider mb-3">Execution Trace</h4>
+              <div className="flex flex-wrap gap-2">
+                {graphResult.execution_trace?.map((step, idx) => (
+                  <span key={idx} className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full text-xs font-mono font-medium">
+                    {idx + 1}. {step}
+                  </span>
+                ))}
+              </div>
+            </div>
+            
+            <ProcurementSimulator 
+              result={simulationResult || graphResult}
+              baseResult={graphResult}
+              vendors={vendors}
+              simulating={simulating}
+              expandedVendorId={expandedVendorId}
+              setExpandedVendorId={setExpandedVendorId}
+            />
+          </div>
+        )}
+      </div>
+
+        {/* RAG Ask AI Section */}
+      <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 mt-8">
+        <div className="flex items-center gap-2 mb-4 border-b pb-2">
+          <Play size={20} className="text-purple-600" />
+          <h3 className="text-xl font-semibold text-gray-900">Ask Procurement AI</h3>
+        </div>
+        
+        <form onSubmit={handleAskAI} className="flex gap-3 mb-6">
+          <input 
+            type="text"
+            className="flex-1 border border-gray-300 rounded-md px-4 py-2 text-sm focus:ring-purple-500 focus:border-purple-500"
+            placeholder="e.g. What are the termination conditions?"
+            value={aiQuery}
+            onChange={(e) => setAiQuery(e.target.value)}
+            disabled={aiLoading}
+          />
+          <button 
+            type="submit"
+            disabled={aiLoading || !aiQuery.trim()}
+            className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-2 rounded-md text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
+          >
+            {aiLoading ? <Loader2 size={16} className="animate-spin" /> : "Ask AI"}
+          </button>
+        </form>
+
+        {aiResult && (
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-5">
+            <div className="mb-4">
+              <div className="flex items-center gap-2 mb-2">
+                <h4 className="text-sm font-bold text-gray-900 uppercase tracking-wider">Answer</h4>
+                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                  aiResult.confidence === 'high' ? 'bg-green-100 text-green-800' :
+                  aiResult.confidence === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                  'bg-red-100 text-red-800'
+                }`}>
+                  {aiResult.confidence} confidence
+                </span>
+              </div>
+              <p className="text-gray-800 whitespace-pre-wrap text-sm leading-relaxed">{aiResult.answer}</p>
+            </div>
+            
+            {aiResult.sources && aiResult.sources.length > 0 && (
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Evidence Sources</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {aiResult.sources.map((src, idx) => {
+                    const vName = vendors.find(v => v.id === src.vendor_id)?.name || 'Unknown Vendor';
+                    return (
+                      <div key={idx} className="bg-white border border-gray-200 rounded p-3 text-xs">
+                        <div className="font-semibold text-gray-800 mb-1">{vName}</div>
+                        <div className="text-gray-500">Page {src.page_number} &middot; {src.section}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
