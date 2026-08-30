@@ -13,9 +13,22 @@ from pydantic import BaseModel
 
 from backend.routes import evaluations, requirements, vendors, proposals, search, rag
 
+import psutil
+process = psutil.Process(os.getpid())
+print(f"[MEMORY] before FastAPI startup: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+
 load_dotenv()
 
 app = FastAPI(title="AI Procurement Agent API")
+
+@app.on_event("startup")
+def log_startup_memory():
+    p = psutil.Process(os.getpid())
+    print(f"[MEMORY] after application imports: {p.memory_info().rss / 1024 / 1024:.2f} MB")
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 app.add_middleware(
     CORSMiddleware,

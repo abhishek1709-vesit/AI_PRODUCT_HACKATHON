@@ -1,5 +1,3 @@
-from sentence_transformers import SentenceTransformer
-import torch
 import warnings
 
 # Suppress noisy HuggingFace warnings
@@ -12,25 +10,36 @@ class EmbeddingService:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(EmbeddingService, cls).__new__(cls)
-            cls._instance._initialize()
+            cls._instance.model_name = "sentence-transformers/all-MiniLM-L6-v2"
+            cls._instance.dimension = 384
         return cls._instance
 
-    def _initialize(self):
-        self.model_name = "sentence-transformers/all-MiniLM-L6-v2"
-        self.dimension = 384
-        # Load the model on CPU
-        print(f"Loading embedding model: {self.model_name}...")
-        self._model = SentenceTransformer(self.model_name, device="cpu")
-        print("Model loaded successfully.")
+    def _get_model(self):
+        if self._model is None:
+            import psutil
+            import os
+            process = psutil.Process(os.getpid())
+            print(f"[MEMORY] Before embedding model load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+            
+            print(f"Lazy loading embedding model: {self.model_name}...")
+            # Lazy import to prevent massive startup memory usage
+            from sentence_transformers import SentenceTransformer
+            import torch
+            
+            self._model = SentenceTransformer(self.model_name, device="cpu")
+            print(f"[MEMORY] After embedding model load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+        return self._model
 
     def embed_text(self, text: str) -> list[float]:
         # Generate embedding and return as python list
-        embedding = self._model.encode(text, normalize_embeddings=True)
+        model = self._get_model()
+        embedding = model.encode(text, normalize_embeddings=True)
         return embedding.tolist()
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         # Generate embeddings in batch and return as lists of lists
-        embeddings = self._model.encode(texts, normalize_embeddings=True)
+        model = self._get_model()
+        embeddings = model.encode(texts, normalize_embeddings=True)
         return embeddings.tolist()
 
     def process_proposal_chunks(self, db_session, proposal_id: str, force_rebuild: bool = False):
