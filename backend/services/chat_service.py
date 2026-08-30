@@ -79,7 +79,10 @@ class ChatService:
             vendor = self.db.query(Vendor).filter(Vendor.id == res['vendor_id']).first()
             vendor_name = vendor.name if vendor else "Unknown Vendor"
             
-            part = f"[EVIDENCE {i}]\n"
+            source_id = str(i)
+            
+            part = f"[EVIDENCE {source_id}]\n"
+            part += f"SOURCE_ID: {source_id}\n"
             part += f"Vendor: {vendor_name}\n"
             part += f"Page: {res.get('page_number')}\n"
             part += f"Section: {res.get('section')}\n"
@@ -87,8 +90,11 @@ class ChatService:
             context_parts.append(part)
             
             sources.append({
+                "source_id": source_id,
                 "vendor_id": str(res['vendor_id']),
+                "vendor_name": vendor_name,
                 "proposal_id": str(res['proposal_id']),
+                "chunk_id": res.get("chunk_id"),
                 "page_number": res.get('page_number'),
                 "section": res.get('section'),
                 "evidence": res.get('chunk_text')[:150] + "..." # Snippet
@@ -158,11 +164,7 @@ OUTPUT FORMAT (Valid JSON):
     "answer": "Your detailed response...",
     "sources": [
         {
-            "vendor_id": "uuid",
-            "proposal_id": "uuid",
-            "page_number": 1,
-            "section": "SLA",
-            "evidence": "Exact quote from text"
+            "source_id": "The ID provided in SOURCE_ID of the EVIDENCE block"
         }
     ]
 }"""
@@ -187,9 +189,18 @@ USER QUESTION:
             llm_response = self.llm_service.generate_json_response(system_prompt, user_prompt)
             
             answer = llm_response.get("answer", "I couldn't process that question right now.")
-            sources = llm_response.get("sources", [])
+            llm_sources = llm_response.get("sources", [])
             
-            # Match sources with proposal_id if LLM missed it, though we instructed it to copy.
+            # Map selected sources back to authoritative metadata
+            validated_sources = []
+            for src in llm_sources:
+                s_id = str(src.get("source_id", ""))
+                for ret_src in retrieved_sources:
+                    if ret_src["source_id"] == s_id:
+                        validated_sources.append(ret_src)
+                        break
+            
+            sources = validated_sources
             
             # Save user message
             user_msg = ProcurementChatMessage(session_id=session.id, role='user', content=message)

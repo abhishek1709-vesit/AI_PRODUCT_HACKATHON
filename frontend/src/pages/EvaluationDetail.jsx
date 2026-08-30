@@ -249,7 +249,7 @@ export default function EvaluationDetail() {
   const prioritiesValid = priorities.requirements + priorities.cost + priorities.risk === 100;
   const displayResult = simulationResult || graphResult;
   // A proposal is pending if it's not ready and not explicitly failed
-  const hasPendingProposals = proposals.some(p => p.processing_status !== 'ready' && p.processing_status !== 'failed');
+  const hasPendingProposals = proposals.some(p => ['pending', 'uploaded', 'processing', 'embedding'].includes(p.processing_status));
   const recVendorId = displayResult ? (displayResult.recommended_vendor_id || (displayResult.ranking && displayResult.ranking[0])) : null;
 
   // Build vendor_id → proposal_id map for evidence traceability.

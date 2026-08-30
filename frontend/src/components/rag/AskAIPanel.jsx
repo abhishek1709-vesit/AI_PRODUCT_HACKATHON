@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { Search, Loader2, MessageSquare } from 'lucide-react';
 import { SectionCard } from '../ui/Card.jsx';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import Button from '../ui/Button.jsx';
 import Badge from '../ui/Badge.jsx';
 import { useToast } from '../ui/ToastContext.jsx';
@@ -113,7 +115,30 @@ export default function AskAIPanel({ evaluationId, vendors = [], hasPendingPropo
             </div>
 
             <div className="px-4 py-4">
-              <p className="text-sm text-slate-800 whitespace-pre-wrap leading-relaxed">{result.answer}</p>
+              <div className="markdown-body text-sm text-slate-800 leading-relaxed">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    p: ({node, ...props}) => <p className="mb-3 last:mb-0" {...props} />,
+                    ul: ({node, ...props}) => <ul className="list-disc pl-5 mb-3 last:mb-0 space-y-1" {...props} />,
+                    ol: ({node, ...props}) => <ol className="list-decimal pl-5 mb-3 last:mb-0 space-y-1" {...props} />,
+                    li: ({node, ...props}) => <li className="pl-1" {...props} />,
+                    h1: ({node, ...props}) => <h1 className="text-lg font-bold mb-2 mt-4 first:mt-0 text-slate-900" {...props} />,
+                    h2: ({node, ...props}) => <h2 className="text-base font-bold mb-2 mt-4 first:mt-0 text-slate-900" {...props} />,
+                    h3: ({node, ...props}) => <h3 className="text-sm font-bold mb-2 mt-3 first:mt-0 text-slate-900" {...props} />,
+                    strong: ({node, ...props}) => <strong className="font-semibold text-slate-900" {...props} />,
+                    a: ({node, ...props}) => <a className="text-indigo-600 hover:underline font-medium" {...props} />,
+                    pre: ({node, ...props}) => <pre className="bg-slate-100 p-2 rounded text-[13px] text-slate-700 overflow-x-auto mb-3 last:mb-0" {...props} />,
+                    code: ({node, className, children, ...props}) => <code className={`${className || ''} bg-slate-100 px-1.5 py-0.5 rounded text-[13px] text-slate-700`} {...props}>{children}</code>,
+                    blockquote: ({node, ...props}) => <blockquote className="border-l-4 border-slate-300 pl-3 italic text-slate-600 mb-3 last:mb-0" {...props} />,
+                    table: ({node, ...props}) => <div className="overflow-x-auto mb-3 last:mb-0"><table className="min-w-full divide-y divide-slate-200" {...props} /></div>,
+                    th: ({node, ...props}) => <th className="px-3 py-2 bg-slate-50 text-left text-xs font-medium text-slate-500 uppercase tracking-wider" {...props} />,
+                    td: ({node, ...props}) => <td className="px-3 py-2 whitespace-nowrap text-sm text-slate-700 border-b border-slate-100" {...props} />
+                  }}
+                >
+                  {result.answer}
+                </ReactMarkdown>
+              </div>
             </div>
 
             {/* Sources */}
@@ -126,7 +151,7 @@ export default function AskAIPanel({ evaluationId, vendors = [], hasPendingPropo
                   {result.sources.map((src, idx) => (
                     <div key={idx} className="flex items-start gap-2 bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-xs">
                       <div className="min-w-0">
-                        <p className="font-semibold text-slate-700 truncate">{getVendorName(src.vendor_id)}</p>
+                        <p className="font-semibold text-slate-700 truncate">{src.vendor_name || getVendorName(src.vendor_id)}</p>
                         <p className="text-slate-500 mt-0.5">
                           {src.page_number && `Page ${src.page_number}`}
                           {src.page_number && src.section && ' · '}

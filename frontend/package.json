@@ -15,8 +15,10 @@
     "pdfjs-dist": "^6.3.289",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
     "react-pdf": "^10.5.0",
-    "react-router-dom": "^7.18.3"
+    "react-router-dom": "^7.18.3",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
